@@ -15,7 +15,7 @@ const ExpressError = require("./utils/expresserrors.js");
 const { listingSchema, reviewSchema } = require("./schema.js");
 const Review = require("./models/review.js");
 const session = require("express-session");
-const MongoStore = require("connect-mongo");
+const MongoStore = require("connect-mongo").default;
 
 const flash = require("connect-flash");
 const passport = require("passport");
@@ -32,69 +32,95 @@ const userRouter = require ("./routes/user.js");
 
 dns.setServers(["1.1.1.1", "8.8.8.8"]);
 const dbUrl = process.env.ATLASDB_URL || "mongodb://127.0.0.1:27017/wanderlust";
+const isAtlas = /^mongodb\+srv:\/\//.test(dbUrl);
 
-main()
-  .then(() => {
-    console.log("connected to DB");
-  })
-  .catch((err) => {
-    console.log(err);
-  });
+let store; // Declare store variable
 
-async function main() {
-  await mongoose.connect(dbUrl, {
-    serverSelectionTimeoutMS: 5000,
-    socketTimeoutMS: 45000,
-  });
+// Database connection and setup
+async function connectDB() {
+  try {
+    await mongoose.connect(dbUrl, {
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
+    });
+    console.log("Connected to DB");
+
+    // Create session store after successful DB connection
+    store = MongoStore.create({
+      client: mongoose.connection.getClient(),
+      crypto: {
+        secret: process.env.SECRET,
+      },
+      touchAfter: 24 * 60 * 60, // time period in seconds
+    });
+
+    store.on("error", (err) =>{
+      console.log("Session store error", err);
+    });
+
+    // Set up session middleware
+    app.use(session({
+      store,
+      secret: process.env.SECRET,
+      resave: false,
+      saveUninitialized: true,
+      cookie: {
+        httpOnly: true,
+        expires: Date.now() + 1000 * 60 * 60 * 24 * 7, // 1 week
+        maxAge: 1000 * 60 * 60 * 24 * 7,
+      },
+    }));
+
+    console.log("Session store configured");
+  } catch (err) {
+    console.error("Database connection failed:", err.message);
+    console.log("Falling back to local MongoDB...");
+
+    try {
+      // Try local MongoDB as fallback
+      const localUrl = "mongodb://127.0.0.1:27017/wanderlust";
+      await mongoose.connect(localUrl, {
+        serverSelectionTimeoutMS: 5000,
+      });
+      console.log("Connected to local MongoDB");
+
+      // Create session store with local connection
+      store = MongoStore.create({
+        client: mongoose.connection.getClient(),
+        crypto: {
+          secret: process.env.SECRET,
+        },
+        touchAfter: 24 * 60 * 60, // time period in seconds
+      });
+
+      store.on("error", (err) =>{
+        console.log("Session store error", err);
+      });
+
+      // Set up session middleware
+      app.use(session({
+        store,
+        secret: process.env.SECRET,
+        resave: false,
+        saveUninitialized: true,
+        cookie: {
+          httpOnly: true,
+          expires: Date.now() + 1000 * 60 * 60 * 24 * 7, // 1 week
+          maxAge: 1000 * 60 * 60 * 24 * 7,
+        },
+      }));
+
+      console.log("Session store configured with local MongoDB");
+    } catch (localErr) {
+      console.error("Local MongoDB connection also failed:", localErr.message);
+      console.log("Please ensure MongoDB is running locally or check your Atlas network access.");
+      process.exit(1);
+    }
+  }
 }
 
-app.set("view engine", "ejs");
-app.set("views", path.join(__dirname, "views"));
-app.use(express.urlencoded({ extended: true }));
-app.use(methodOverride("_method"));
-app.engine('ejs' , ejsMate);
-app.use(express.static(path.join(__dirname, "/public")));
-
-const store = MongoStore.create({
-  mongoUrl: dbUrl,
-  crypto: {
-    secret: process.env.SECRET,
-  },
-  touchAfter: 24 * 60 * 60, // time period in seconds
-});
-
-store.on("error", () =>{
-  console.log("Session store error",err);
-});
-
-const sessionOptions = {
-  store,
-  secret: process.env.SECRET,
-  resave: false,
-  saveUninitialized: true,
-  cookie: {
-    httpOnly: true,
-    expires: Date.now() + 1000 * 60 * 60 * 24 * 7, // 1 week
-    maxAge: 1000 * 60 * 60 * 24 * 7,
-  },
-};
-
-
-
-// app.get("/", (req, res) => {
-//   res.send("Hi, I am root");
-// });
-
-
-
-app.use(session(sessionOptions));
-app.use(flash());
-
-app.use(passport.initialize());
-app.use(passport.session());
-passport.use(new LocalStratergy(User.authenticate()));
-
-passport.serializeUser(User.serializeUser());
+// Initialize database connection
+connectDB();
 passport.deserializeUser(User.deserializeUser());
 
 
